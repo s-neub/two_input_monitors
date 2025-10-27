@@ -21,8 +21,7 @@ def metrics(data: pd.DataFrame):
     no_of_rows=len(data) #return a string/number
     # table={} # See the documentation here to get the table structure: https://modelopdocs.atlassian.net/wiki/spaces/dv33/pages/2051900216/Monitor+Output+Structure
     table = data.to_dict(orient='records')
-    ''' 
-    DESIRED OUTPUT:
+    ''' DESIRED OUTPUT:
         table=  "generic_table": [
             {"data1" : 1, "data2" : 2, "data3" : 3},
             {"data1" : 2, "data2" : 3, "data3": 4},
@@ -43,7 +42,7 @@ def main(): #ignore this part and just copy it as it is
 
 
 if __name__ == '__main__':
-	# main()   
+	main()   
     # Import csv file into pandas dataframe
-    data = pd.read_csv('table_3x3.csv')
-    print(json.dumps(next(metrics(data)), indent=2))
+    # data = pd.read_csv('table_3x3.csv')
+    # print(json.dumps(next(metrics(data)), indent=2))
