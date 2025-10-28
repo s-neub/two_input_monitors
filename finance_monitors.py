@@ -15,6 +15,45 @@ MAX_CATEGORICAL_CARDINALITY = 50
 MAX_RECORDS_FOR_SCATTER = 1000
 
 
+def _canonical_chart_type(name: str) -> str:
+    """Map a user-friendly or legacy chart type key to the canonical chart_groups key.
+
+    Accepts short names like 'pie', 'bar', 'time_line', 'scatter' and returns
+    the canonical group name used elsewhere in this module.
+    """
+    if not name:
+        return name
+    key = name.lower()
+    mapping = {
+        # line graphs
+        'time_line': 'time_line_graph',
+        'timeline': 'time_line_graph',
+        'time_line_graph': 'time_line_graph',
+        'generic_line_graph': 'generic_line_graph',
+        'decimal_line_graph': 'decimal_line_graph',
+        'line': 'generic_line_graph',
+        'd_line': 'decimal_line_graph',
+        'decimal': 'decimal_line_graph',
+        # bars
+        'bar': 'generic_bar_graph',
+        'generic_bar_graph': 'generic_bar_graph',
+        'h_bar': 'horizontal_bar_graph',
+        'horizontal_bar_graph': 'horizontal_bar_graph',
+        'horizontal_bar': 'horizontal_bar_graph',
+        # pies / donuts
+        'pie': 'generic_pie_chart',
+        'generic_pie_chart': 'generic_pie_chart',
+        'donut': 'generic_donut_chart',
+        'generic_donut_chart': 'generic_donut_chart',
+        # scatter / table
+        'scatter': 'generic_scatter_plot',
+        'generic_scatter_plot': 'generic_scatter_plot',
+        'table': 'generic_table',
+        'generic_table': 'generic_table'
+    }
+    return mapping.get(key, name)
+
+
 # modelop.init
 def init(init_param):
     job = json.loads(init_param["rawJson"])
@@ -113,6 +152,18 @@ def get_available_monitors(data: pd.DataFrame) -> Dict[str, List[Dict[str, str]]
     for cat_col in categorical_cols:
         pie_specs.append({"category": cat_col})
 
+    # Spec: Donut Chart (sum of numeric values by Category) - use float/decimal numeric cols
+    donut_specs: List[Dict[str, str]] = []
+    for cat_col in categorical_cols:
+        for num_col in true_numeric_cols:
+            # only consider decimal/float columns for donut (currency-like)
+            try:
+                if np.issubdtype(data[num_col].dtype, np.floating) and data[num_col].nunique() > 1:
+                    donut_specs.append({"category": cat_col, "numeric": num_col})
+            except Exception:
+                # ignore any unexpected dtype issues
+                continue
+
     # Spec: Scatter Plot (Numeric vs. Numeric)
     # Avoid duplicate plots (e.g., A vs B and B vs A)
     plotted_pairs = set()
@@ -134,19 +185,27 @@ def get_available_monitors(data: pd.DataFrame) -> Dict[str, List[Dict[str, str]]
         else:
             specs["decimal_line_graph"].append(s)
 
-    # Distribute bar specs between generic and horizontal alternately
-    for i, s in enumerate(bar_specs):
-        if i % 2 == 0:
-            specs["generic_bar_graph"].append(s)
-        else:
-            specs["horizontal_bar_graph"].append(s)
+    # Distribute bar specs into horizontal vs generic based on the number of
+    # categories present for the index column. Use horizontal for <=8 bars,
+    # generic (vertical) for >=9 bars. This mirrors the runtime selection logic.
+    for s in bar_specs:
+        idx_col = s.get('index')
+        try:
+            n_cats = int(data[idx_col].nunique()) if idx_col in data.columns else MAX_CATEGORICAL_GROUPS + 1
+        except Exception:
+            n_cats = MAX_CATEGORICAL_GROUPS + 1
 
-    # Distribute pie specs between pie and donut alternately
-    for i, s in enumerate(pie_specs):
-        if i % 2 == 0:
-            specs["generic_pie_chart"].append(s)
+        if n_cats <= 8:
+            specs["horizontal_bar_graph"].append(s)
         else:
-            specs["generic_donut_chart"].append(s)
+            specs["generic_bar_graph"].append(s)
+
+
+    # Assign pie specs (counts) and donut specs (numeric breakdowns)
+    for s in pie_specs:
+        specs["generic_pie_chart"].append(s)
+    for s in donut_specs:
+        specs["generic_donut_chart"].append(s)
 
     # Scatter stays as generic_scatter_plot
     specs["generic_scatter_plot"] = scatter_specs
@@ -154,8 +213,12 @@ def get_available_monitors(data: pd.DataFrame) -> Dict[str, List[Dict[str, str]]
     # Use the actual keys created above. Avoid KeyError when keys don't exist.
     print(
         f"Generated {len(specs.get('time_line_graph', []))} time-line, "
-        f"{len(specs.get('generic_bar_graph', []))} bar, "
+        f"{len(specs.get('generic_line_graph', []))} generic-line, "
+        f"{len(specs.get('decimal_line_graph', []))} decimal-line, "
+        f"{len(specs.get('generic_bar_graph', []))} generic-bar, "
+        f"{len(specs.get('horizontal_bar_graph', []))} horizontal-bar, "
         f"{len(specs.get('generic_pie_chart', []))} pie, "
+        f"{len(specs.get('generic_donut_chart', []))} donut, "
         f"{len(specs.get('generic_scatter_plot', []))} scatter specs."
     )
     return specs
@@ -163,27 +226,32 @@ def get_available_monitors(data: pd.DataFrame) -> Dict[str, List[Dict[str, str]]
 
 # --- Helper Functions to Build Charts from Specs ---
 
-def _generate_time_line_charts(data: pd.DataFrame, specs: List[Dict[str, str]]) -> Dict[str, Dict]:
-    """Builds time_line_graph JSON objects from specs."""
+def _generate_line_graphs(data: pd.DataFrame, specs: List[Dict[str, str]]) -> Dict[str, Dict]:
+    """Builds line graph JSON objects from specs.
+
+    This generator produces the same payload as the previous _generate_time_line_charts
+    but the name better reflects that these are line graphs (time-series or generic)
+    and clarifies intent.
+    """
     charts = {}
     for i, spec in enumerate(specs):
         t, n, c = spec['time'], spec['numeric'], spec['category']
         chart_key = f"timeline_{n.lower()}_by_{c.lower()}_{i}"
         chart_title = f"{n} over Time by {c}"
-        
+
         try:
             # Group by time and category, get the mean of the numeric value
             df_agg = data.groupby([t, c])[n].mean().reset_index()
-            
+
             chart_data = {}
             # Pivot the data into the required format: {category_name: [[timestamp, value], ...]}
             for cat_name, group_df in df_agg.groupby(c):
                 series_data = group_df[[t, n]].apply(
-                    lambda x: [x.iloc[0].isoformat(), round(x.iloc[1], 4)], 
+                    lambda x: [x.iloc[0].isoformat(), round(x.iloc[1], 4)],
                     axis=1
                 ).tolist()
                 chart_data[str(cat_name)] = series_data
-            
+
             if not chart_data:
                 continue
 
@@ -245,23 +313,61 @@ def _generate_pie_charts(data: pd.DataFrame, specs: List[Dict[str, str]]) -> Dic
         
         try:
             df_counts = data[c].value_counts()
-            
-            # The template format `{"data1": [1,2,3]}` has no labels.
-            # We will provide labels in the title as a workaround.
-            data_series = df_counts.values.tolist()
-            label_series = df_counts.index.astype(str).tolist()
-            chart_title = f"Record Count by {c} (Labels: {', '.join(label_series)})"
+
+            # Build a data mapping where each label becomes a series key so the
+            # front-end can display labels correctly instead of relying on a
+            # generic "data1" key. Each value is provided as a single-element
+            # list to match the expected series format.
+            data_dict: Dict[str, List[float]] = {}
+            for label, val in df_counts.items():
+                # convert to native types for JSON serialization
+                try:
+                    v = float(val)
+                except Exception:
+                    v = float(int(val)) if pd.notna(val) else 0.0
+                data_dict[str(label)] = [round(v, 4)]
+
+            chart_title = f"Record Count by {c}"
 
             charts[chart_key] = {
                 "title": chart_title,
                 "type": "pie",
-                "data": {
-                    "data1": data_series # Put the data in the "data1" series
-                }
-                # Note: We've added labels to the title as the template doesn't support them.
+                "data": data_dict
             }
         except Exception as e:
             print(f"Failed to build {chart_key}: {e}")
+    return charts
+
+
+def _generate_donut_charts(data: pd.DataFrame, specs: List[Dict[str, str]]) -> Dict[str, Dict]:
+    """Builds generic_donut_chart JSON objects from specs (numeric breakdown by category)."""
+    charts = {}
+    for i, spec in enumerate(specs):
+        c = spec.get('category')
+        num = spec.get('numeric')
+        # Use a donut_ prefix so callers can distinguish donut charts from pie-count charts
+        chart_key = f"donut_{num.lower()}_by_{c.lower()}_{i}"
+
+        try:
+            # Aggregate numeric by category (sum) and present as donut proportions
+            df_agg = data.groupby(c)[num].sum().sort_values(ascending=False)
+            data_dict: Dict[str, List[float]] = {}
+            for label, val in df_agg.items():
+                try:
+                    v = float(val)
+                except Exception:
+                    v = 0.0
+                data_dict[str(label)] = [round(v, 4)]
+
+            chart_title = f"{num} by {c} (Donut)"
+
+            charts[chart_key] = {
+                "title": chart_title,
+                "type": "donut",
+                "data": data_dict
+            }
+        except Exception as e:
+            print(f"Failed to build donut {chart_key}: {e}")
     return charts
 
 def _generate_scatter_plots(data: pd.DataFrame, specs: List[Dict[str, str]], max_records: int) -> Dict[str, Dict]:
@@ -333,14 +439,11 @@ def metrics(data: pd.DataFrame, chart_count: Dict[str, int] = None, chart_order:
     # --- 4. Generate All Dynamic Monitors ---
     
     # Generate all charts first
-    print("Generating time-line charts...")
-    # combine the time-series related spec buckets
-    time_specs = (
-        monitor_specs.get('time_line_graph', [])
-        + monitor_specs.get('generic_line_graph', [])
-        + monitor_specs.get('decimal_line_graph', [])
-    )
-    time_line_charts = _generate_time_line_charts(data_clean, time_specs)
+    print("Generating line graphs...")
+    # Generate line graphs (time-series) separately for each time-related spec bucket
+    time_line_charts = _generate_line_graphs(data_clean, monitor_specs.get('time_line_graph', []))
+    generic_line_charts = _generate_line_graphs(data_clean, monitor_specs.get('generic_line_graph', []))
+    decimal_line_charts = _generate_line_graphs(data_clean, monitor_specs.get('decimal_line_graph', []))
     
     print("Generating bar charts...")
     bar_specs = (
@@ -349,26 +452,43 @@ def metrics(data: pd.DataFrame, chart_count: Dict[str, int] = None, chart_order:
     )
     bar_charts = _generate_bar_charts(data_clean, bar_specs)
     
-    print("Generating pie charts...")
-    pie_specs = (
-        monitor_specs.get('generic_pie_chart', [])
-        + monitor_specs.get('generic_donut_chart', [])
-    )
+    print("Generating pie charts (counts) and donut charts (numeric breakdowns)...")
+    pie_specs = monitor_specs.get('generic_pie_chart', [])
+    donut_specs = monitor_specs.get('generic_donut_chart', [])
     pie_charts = _generate_pie_charts(data_clean, pie_specs)
+    donut_charts = _generate_donut_charts(data_clean, donut_specs)
     
     print("Generating scatter plots...")
     scatter_charts = _generate_scatter_plots(data_clean, monitor_specs.get('generic_scatter_plot', []), MAX_RECORDS_FOR_SCATTER)
     
     # Group charts by type
+    # Split bar charts into generic vs horizontal based on category counts
+    generic_bar_charts: Dict[str, Dict] = {}
+    horizontal_bar_charts: Dict[str, Dict] = {}
+    for k, v in bar_charts.items():
+        n_cats = len(v.get('categories', []) or [])
+        if n_cats <= 8:
+            horizontal_bar_charts[k] = v
+        else:
+            generic_bar_charts[k] = v
+
+    # Keep the time-related chart groups separate (they may be empty)
     chart_groups = {
-        'time_line': {k: v for k, v in time_line_charts.items()},
-        'bar': {k: v for k, v in bar_charts.items()},
-        'pie': {k: v for k, v in pie_charts.items()},
-        'scatter': {k: v for k, v in scatter_charts.items()}
+        'time_line_graph': {k: v for k, v in time_line_charts.items()},
+        'generic_line_graph': {k: v for k, v in generic_line_charts.items()},
+        'decimal_line_graph': {k: v for k, v in decimal_line_charts.items()},
+        'generic_bar_graph': generic_bar_charts,
+        'horizontal_bar_graph': horizontal_bar_charts,
+        'generic_scatter_plot': {k: v for k, v in scatter_charts.items()},
+        'generic_pie_chart': {k: v for k, v in pie_charts.items()},
+        'generic_donut_chart': {k: v for k, v in donut_charts.items()},
+        'generic_table': {"generic_table": {"data": all_results.get('table')}}
     }
-    
-    # First, collect all available charts
-    all_available_charts = {**time_line_charts, **bar_charts, **pie_charts, **scatter_charts}
+
+    # First, collect all available charts into a single lookup
+    all_available_charts = {}
+    for grp in ['time_line_graph', 'generic_line_graph', 'decimal_line_graph', 'generic_bar_graph', 'horizontal_bar_graph', 'generic_pie_chart', 'generic_donut_chart', 'generic_scatter_plot', 'generic_table']:
+        all_available_charts.update(chart_groups.get(grp, {}))
     
     # Filter charts based on order or limits
     if chart_order:
@@ -407,23 +527,50 @@ def metrics(data: pd.DataFrame, chart_count: Dict[str, int] = None, chart_order:
             'time_line': [],
             'bar': [],
             'pie': [],
-            'scatter': []
+            'donut': [],
+            'scatter': [],
+            'table': []
         }
     
-        # Organize charts by type while preserving order
+        # Organize charts by type while preserving order (map key prefixes to new group names)
         for chart_key in valid_chart_order:
             if chart_key.startswith('timeline_'):
                 ordered_charts['time_line'].append((chart_key, all_available_charts[chart_key]))
             elif chart_key.startswith('bar_'):
                 ordered_charts['bar'].append((chart_key, all_available_charts[chart_key]))
+            elif chart_key.startswith('donut_'):
+                ordered_charts['donut'].append((chart_key, all_available_charts[chart_key]))
             elif chart_key.startswith('pie_'):
                 ordered_charts['pie'].append((chart_key, all_available_charts[chart_key]))
             elif chart_key.startswith('scatter_'):
                 ordered_charts['scatter'].append((chart_key, all_available_charts[chart_key]))
-    
-        # Convert to the format needed for standardized mapping
+            elif chart_key == 'generic_table':
+                ordered_charts['table'].append((chart_key, all_available_charts[chart_key]))
+
+        # Convert ordered lists to dicts, then map to the final group names used downstream
+        ordered_dicts = {k: dict(v) for k, v in ordered_charts.items()}
+
+        # classify ordered bar charts into horizontal vs generic based on categories
+        od_bar = ordered_dicts.get('bar', {})
+        od_generic_bar = {}
+        od_horizontal_bar = {}
+        for k, v in od_bar.items():
+            n_cats = len(v.get('categories', []) or [])
+            if n_cats <= 8:
+                od_horizontal_bar[k] = v
+            else:
+                od_generic_bar[k] = v
+
         chart_groups = {
-            chart_type: dict(charts) for chart_type, charts in ordered_charts.items()
+            'time_line_graph': ordered_dicts.get('time_line', {}),
+            'generic_line_graph': {},
+            'decimal_line_graph': {},
+            'generic_bar_graph': od_generic_bar,
+            'horizontal_bar_graph': od_horizontal_bar,
+            'generic_scatter_plot': ordered_dicts.get('scatter', {}),
+            'generic_pie_chart': ordered_dicts.get('pie', {}),
+            'generic_donut_chart': ordered_dicts.get('donut', {}),
+            'generic_table': ordered_dicts.get('table', {})
         }
     
         # Keep filtered_charts for reference
@@ -434,12 +581,22 @@ def metrics(data: pd.DataFrame, chart_count: Dict[str, int] = None, chart_order:
         # Previously we included all chart types and applied limits only where provided
         # which could return chart types the user didn't request. Now we restrict
         # output to the types present in chart_count (more explicit control).
+        # Normalize user-provided keys to canonical group names so callers can
+        # use short names like 'pie' or 'bar'.
+        normalized_counts: Dict[str, int] = {}
+        for user_key, limit in chart_count.items():
+            canon = _canonical_chart_type(user_key)
+            if canon in chart_groups:
+                normalized_counts[canon] = int(limit)
+            else:
+                print(f"Warning: requested chart_count key '{user_key}' (normalized '{canon}') not recognized; skipping.")
+
         filtered_charts = {}
         for chart_type, charts in chart_groups.items():
-            if chart_type not in chart_count:
+            if chart_type not in normalized_counts:
                 # skip chart types not requested
                 continue
-            limit = chart_count.get(chart_type, len(charts))
+            limit = normalized_counts.get(chart_type, len(charts))
             filtered_charts.update(
                 dict(list(charts.items())[:limit])
             )
@@ -557,28 +714,59 @@ def metrics(data: pd.DataFrame, chart_count: Dict[str, int] = None, chart_order:
     # Process bar charts
     bar_values = [v for k, v in filtered_charts.items() if k.startswith('bar_')]
     if bar_values:
-            # Map each bar chart to the appropriate type based on order
-            for i, bar_chart in enumerate(bar_values):
-                if i == 0:
-                    # First bar chart is always vertical (generic_bar_graph)
-                    standardized_results["generic_bar_graph"] = {
-                        "title": bar_chart.get("title", "Bar Chart"),
-                        "x_axis_label": bar_chart.get("x_axis_label", "X Axis"),
-                        "y_axis_label": bar_chart.get("y_axis_label", "Y Axis"),
-                        "rotated": False,
-                        "data": bar_chart.get("data", {}),
-                        "categories": bar_chart.get("categories", [])
-                    }
-                elif i == 1:
-                    # Second bar chart is always horizontal
-                    standardized_results["horizontal_bar_graph"] = {
-                        "title": bar_chart.get("title", "Horizontal Bar Chart"),
-                        "x_axis_label": bar_chart.get("x_axis_label", "X Axis"),
-                        "y_axis_label": bar_chart.get("y_axis_label", "Y Axis"),
-                        "rotated": True,
-                        "data": bar_chart.get("data", {}),
-                        "categories": bar_chart.get("categories", [])
-                    }
+        # For each candidate bar chart, choose horizontal vs generic based on number
+        # of categories: <=8 -> horizontal (rotated=True), >=9 -> generic (rotated=False).
+        # Also sort bars by descending magnitude (sum across series) before emitting.
+        assigned_generic = False
+        assigned_horizontal = False
+        for i, bar_chart in enumerate(bar_values):
+            categories = bar_chart.get('categories', []) or []
+            data_series = bar_chart.get('data', {}) or {}
+
+            # compute total magnitude per category (sum across series)
+            try:
+                n_cats = len(categories)
+                totals = [0.0] * n_cats
+                for series in data_series.values():
+                    for idx, val in enumerate(series):
+                        try:
+                            totals[idx] += float(val)
+                        except Exception:
+                            totals[idx] += 0.0
+                # sort indices by totals descending
+                sort_idx = sorted(range(n_cats), key=lambda j: totals[j], reverse=True)
+                # reorder categories and series accordingly
+                sorted_categories = [categories[j] for j in sort_idx]
+                sorted_data = {k: [v[j] for j in sort_idx] for k, v in data_series.items()}
+            except Exception:
+                # fallback: leave as-is
+                sorted_categories = categories
+                sorted_data = data_series
+
+            # choose chart orientation
+            if len(sorted_categories) <= 8 and not assigned_horizontal:
+                standardized_results["horizontal_bar_graph"] = {
+                    "title": bar_chart.get("title", "Horizontal Bar Chart"),
+                    "x_axis_label": bar_chart.get("x_axis_label", "X Axis"),
+                    "y_axis_label": bar_chart.get("y_axis_label", "Y Axis"),
+                    "rotated": True,
+                    "data": sorted_data,
+                    "categories": sorted_categories
+                }
+                assigned_horizontal = True
+            elif not assigned_generic:
+                standardized_results["generic_bar_graph"] = {
+                    "title": bar_chart.get("title", "Bar Chart"),
+                    "x_axis_label": bar_chart.get("x_axis_label", "X Axis"),
+                    "y_axis_label": bar_chart.get("y_axis_label", "Y Axis"),
+                    "rotated": False,
+                    "data": sorted_data,
+                    "categories": sorted_categories
+                }
+                assigned_generic = True
+            # stop if we have filled both slots
+            if assigned_generic and assigned_horizontal:
+                break
 
     # Process scatter plots
     scatter_values = [v for k, v in filtered_charts.items() if k.startswith('scatter_')]
@@ -591,27 +779,32 @@ def metrics(data: pd.DataFrame, chart_count: Dict[str, int] = None, chart_order:
             "data": scatter_values[0].get("data", {})
         }
 
-    # Process pie/donut charts
+    # Process pie and donut charts separately
     pie_values = [v for k, v in filtered_charts.items() if k.startswith('pie_')]
+    donut_values = [v for k, v in filtered_charts.items() if k.startswith('donut_')]
+
     if pie_values:
-        # Standard pie chart
         standardized_results["generic_pie_chart"] = {
             "title": pie_values[0].get("title", "Pie Chart"),
             "type": "pie",
             "data": pie_values[0].get("data", {})
         }
 
-        # Donut chart (if available)
-        if len(pie_values) > 1:
-            standardized_results["generic_donut_chart"] = {
-                "title": pie_values[1].get("title", "Donut Chart"),
-                "type": "donut",
-                "data": pie_values[1].get("data", {})
-            }
+    if donut_values:
+        standardized_results["generic_donut_chart"] = {
+            "title": donut_values[0].get("title", "Donut Chart"),
+            "type": "donut",
+            "data": donut_values[0].get("data", {})
+        }
     
     # Optionally include the full dataset table as the last item if requested
     if show_dataset:
         standardized_results['table'] = all_results.get('table')
+
+    # If the caller explicitly requested the generic_table as part of chart_count/chart_order,
+    # include it in the output (it will contain the same table payload).
+    if 'generic_table' in filtered_charts:
+        standardized_results['generic_table'] = filtered_charts.get('generic_table')
 
     print(f"Metrics function complete. Returning {len(standardized_results)} total keys.")
     yield standardized_results # the final json object 
@@ -634,9 +827,13 @@ if __name__ == '__main__':
     # Example 1: Limit number of each chart type
     chart_count = {
         # 'time_line': 1,
+        # 'line': 1,
+        # 'd_line': 1,
         # 'bar': 1,
-        'pie': 1,
-        # 'scatter': 1
+        # 'h_bar': 1,
+        # 'scatter': 1,
+        # 'pie': 1,
+        'donut': 1
     }
     metrics_generator = metrics(data, chart_count=chart_count)
     print("\nExample 1 - Limited number of charts:")
