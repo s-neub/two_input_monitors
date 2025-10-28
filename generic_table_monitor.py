@@ -2,8 +2,8 @@ import json
 import pandas as pd
 from pathlib import Path
 import numpy as np
-# import modelop.utils as utils
-# import modelop_sdk.restclient.moc_client as moc_client
+import modelop.utils as utils
+import modelop_sdk.restclient.moc_client as moc_client
 
 
 
