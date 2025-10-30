@@ -824,25 +824,25 @@ if __name__ == '__main__':
     # Uncomment for local testing with different chart filtering options:
     data = pd.read_csv("synthetic_data/synthetic_mlops_financial_data.csv")
     
-    # Example 1: Limit number of each chart type
-    chart_count = {
-        # 'time_line': 1,
-        # 'line': 1,
-        # 'd_line': 1,
-        # 'bar': 1,
-        # 'h_bar': 1,
-        # 'scatter': 1,
-        # 'pie': 1,
-        'donut': 1
-    }
-    metrics_generator = metrics(data, chart_count=chart_count)
-    print("\nExample 1 - Limited number of charts:")
-    print(json.dumps(next(metrics_generator), indent=2))
-    
-    # # Example 2: Specific chart order - single bar chart
-    # metrics_generator = metrics(data, chart_order=['bar_market_value_by_account_id_0'])
-    # print("\nExample 2a - Single bar chart:")
+    # # Example 1: Limit number of each chart type
+    # chart_count = {
+    #     # 'time_line': 1,
+    #     # 'line': 1,
+    #     # 'd_line': 1,
+    #     # 'bar': 1,
+    #     # 'h_bar': 1,
+    #     # 'scatter': 1,
+    #     # 'pie': 1,
+    #     'donut': 1
+    # }
+    # metrics_generator = metrics(data, chart_count=chart_count)
+    # print("\nExample 1 - Limited number of charts:")
     # print(json.dumps(next(metrics_generator), indent=2))
+    
+    # Example 2: Specific chart order - single bar chart
+    metrics_generator = metrics(data, chart_order=['bar_market_value_by_account_id_0'])
+    print("\nExample 2a - Single bar chart:")
+    print(json.dumps(next(metrics_generator), indent=2))
     
     # # Example 2b: Specific chart order - multiple charts in specific order
     # chart_order = [
