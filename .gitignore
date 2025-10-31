@@ -1,5 +1,4 @@
 /.venv
-/.gitignore
 /synthetic_data/pivot_table_generation_for_synthetic_mlops_financial_data.xlsx
 /example_model_test_result.json
 /external-metrics.py
