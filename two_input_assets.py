@@ -1,10 +1,10 @@
 import pandas as pd
 import logging
 import json
-# import modelop.utils as utils
-# import modelop_sdk.restclient.moc_client as moc_client
+import modelop.utils as utils
+import modelop_sdk.restclient.moc_client as moc_client
 
-# logger = utils.configure_logger()
+logger = utils.configure_logger()
 
 #
 # This method gets called when the monitor is loaded by the ModelOp runtime. It sets the GLOBAL values that are
