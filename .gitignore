@@ -4,6 +4,7 @@
 /example_model_test_result.json
 /external-metrics.py
 /Performance_custom.py
+/output.json
 /test.json
 /generic_table_data.csv
 /finance_monitors.py
